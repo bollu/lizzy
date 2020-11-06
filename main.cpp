@@ -197,13 +197,14 @@ void vprintferr(Loc loc, const char *raw_input, const char *fmt, va_list args) {
     assert(outstr);
 
     const int LINELEN = 80;
-    const int CONTEXTLEN = 4;
+    const int CONTEXTLEN = 25;
     char line_buf[2 * LINELEN];
     char pointer_buf[2 * LINELEN];
 
     // find the previous newline character, or some number of characters back.
+    // Keep a one window lookahead.
     ll nchars_back = 0;
-    for (; loc.si - nchars_back >= 1 && raw_input[loc.si - nchars_back] != '\n';
+    for (; loc.si - nchars_back >= 1 && raw_input[loc.si - (nchars_back+1)] != '\n';
          nchars_back++) {
     }
 
@@ -254,6 +255,10 @@ void printferr(Loc loc, const char *raw_input, const char *fmt, ...) {
 }
 
 bool isWhitespace(char c) { return c == ' ' || c == '\n' || c == '\t'; }
+bool isReservedSigil(char c) {
+    return c == '(' || c == ')' || c == '{' || c == '}' || c == ',' || 
+        c == ';' || c == '[' || c == ']' || c == ':';
+}
 
 struct String;
 
@@ -364,7 +369,16 @@ struct Error {
 struct Identifier {
     const Span span;
     const String name;
+    Identifier(const Identifier &other) = default;
     Identifier(Span span, String name) : span(span), name(name){};
+
+    Identifier operator = (const Identifier &other) {
+        return Identifier(other);
+    }
+
+    void print(OutFile &f) const {
+        f << name;
+    }
 };
 
 struct Parser {
@@ -377,13 +391,17 @@ struct Parser {
     bool parseOptionalCloseCurly() {
         return bool(parseOptionalSigil(String::copyCStr("}")));
     }
-    void parseOpenRoundBracket() { parseSigil(String::copyCStr("(")); }
-    bool parseOptionalOpenRoundBracket() {
+    Span parseOpenRoundBracket() { return parseSigil(String::copyCStr("(")); }
+    bool parseOptionalOpenRoundBracket(Span matching) {
         return bool(parseOptionalSigil(String::copyCStr("(")));
     }
     bool parseCloseRoundBracket() {
         return bool(parseOptionalSigil(String::copyCStr(")")));
     }
+    void parseCloseRoundBracket(Span open) {
+        return bool(parseMatchingSigil(open, String::copyCStr(")")));
+    }
+
     bool parseOptionalCloseRoundBracket() {
         return bool(parseOptionalSigil(String::copyCStr(")")));
     }
@@ -456,6 +474,16 @@ struct Parser {
             Error(l, String::sprintf("expected sigil: |%s|", sigil.asCStr())));
         exit(1);
     }
+    Span parseMatchingSigil(const String sigil) {
+        optional<Span> span = parseOptionalSigil(sigil);
+        if (span) {
+            return *span;
+        }
+
+        addErr(
+            Error(l, String::sprintf("expected sigil: |%s|", sigil.asCStr())));
+        exit(1);
+    }
 
     // difference is that a sigil needs no whitespace after it, unlike
     // a keyword.
@@ -509,7 +537,7 @@ struct Parser {
             if (!cchar) {
                 return {};
             }
-            if (!isalpha(*cchar)) {
+            if (isWhitespace(*cchar) || isReservedSigil(*cchar)) {
                 break;
             }
             lcur = lcur.nextc(s[lcur.si]);
@@ -564,7 +592,10 @@ struct Parser {
         eatWhitespace();
         return l.si == s.nchars;
     }
-    Loc getCurrentLoc() const { return l; }
+    Loc getCurrentLoc() { 
+        eatWhitespace();
+        return l; 
+    }
 
    private:
     const String s;
@@ -592,19 +623,17 @@ struct Parser {
     }
 };
 
-enum class TypeType { I64, U64 };
-
 struct Type {
-    TypeType ty;
-    Span span;
+    const Span span;
+    const Identifier tyname;
 
-    Type(TypeType ty, Span span) : ty(ty), span(span){};
+    Type(Span span, Identifier tyname) : span(span), tyname(tyname) {}
 
     void print(OutFile &out) const {
-        if (ty == TypeType::I64) { out << "i64"; }
-        else if (ty == TypeType::U64) { out << "u64"; }
+        out << tyname; 
     }
 };
+
 
 struct Stmt {
     virtual void print(OutFile &out) const = 0;
@@ -636,6 +665,11 @@ struct CaseLHSIdentifier : public CaseLHS {
         : CaseLHS(span, ECaseLHS::Identifier), ident(ident){};
 
     OutFile &print(OutFile &out) const override { return out << ident; }
+};
+
+struct CaseLHSTupleStruct : public CaseLHS {
+    const Identifier name;
+    vector<CaseLHS *> fields;
 };
 
 enum class ExprType { Case, Identifier, Integer, FnCall, Binop };
@@ -748,25 +782,28 @@ struct StmtReturn : public Stmt {
 };
 
 Type parseType(Parser &in) {
-    optional<Span> sp;
-    if ((sp = in.parseOptionalKeyword(String::copyCStr("i64")))) {
-        return Type(TypeType::I64, *sp);
-    } else if ((sp = in.parseOptionalKeyword(String::copyCStr("u64")))) {
-        return Type(TypeType::U64, *sp);
+    Loc lbegin = in.getCurrentLoc();
+    optional<Identifier> ident;
+    if ((ident = in.parseOptionalIdentifier())) {
+        return Type(Span(lbegin, in.getCurrentLoc()), *ident);
+    } else {
+        in.addErrAtCurrentLoc(String::copyCStr("expected type."));
+        exit(1);
     }
-
-    in.addErrAtCurrentLoc(String::copyCStr("expected type."));
-    exit(1);
 };
+
 
 CaseLHS *parseCaseLHS(Parser &in) {
     optional<pair<Span, ll>> integer(in.parseOptionalInteger());
+    // parse pattern match
     if (integer) {
         return new CaseLHSInt(integer->first, integer->second);
     }
 
+    // it can be either <ident>, or it can be <struct-name> (<struct-fields>)
     optional<Identifier> ident(in.parseOptionalIdentifier());
     if (ident) {
+
         return new CaseLHSIdentifier(ident->span, ident->name);
     }
 
@@ -955,9 +992,85 @@ Fn parseFn(Parser &in) {
     return Fn(Span(lbegin, in.getCurrentLoc()), ident, params, retty, b);
 };
 
+enum class StructFieldsType { Tuple };
+struct StructFields {
+    Span span;
+    StructFieldsType type;
+    StructFields(Span span, StructFieldsType type): span(span), type(type) {};
+};
+
+struct StructFieldsTuple : public StructFields {
+    StructFieldsTuple(Span span, vector<Type> types) : 
+        StructFields(span, StructFieldsType::Tuple),  types(types) {};
+    const vector<Type> types;
+};
+
+StructFields *parseStructFields(Parser &in) {
+    Loc lbegin = in.getCurrentLoc();
+    in.parseOpenRoundBracket();
+    vector<Type> types;
+
+    if (in.parseOptionalCloseRoundBracket()) {
+        /*done*/
+    } else {
+        while(1) {
+            types.push_back(parseType(in));
+            if (in.parseCloseRoundBracket()) { break; }
+            else { in.parseComma(); }
+        }
+    }
+    return new StructFieldsTuple(Span(lbegin, in.getCurrentLoc()), types);
+}
+
+struct Struct {
+    const Span span;
+    const Identifier name;
+    StructFields *fields;
+
+    Struct(Span span, Identifier name, StructFields *fields) : span(span), name(name), fields(fields) {};
+};
+
+Struct parseStruct(Parser &in) {
+    Loc lbegin = in.getCurrentLoc();
+    Identifier ident = in.parseIdentifier();
+    StructFields *fields = parseStructFields(in);
+    in.parseOptionalSemicolon();
+    return Struct(Span(lbegin, in.getCurrentLoc()), ident, fields);
+}
+
+struct Enum {
+    const Span span;
+    const Identifier name;
+    using EnumConstructor = pair<Identifier, StructFields*>;
+    const vector<EnumConstructor> constructors;
+
+    Enum(Span span, Identifier name, vector<EnumConstructor> constructors)
+        : span(span), name(name), constructors(constructors) {};
+};
+
+Enum parseEnum(Parser &in) {
+    Loc lbegin = in.getCurrentLoc();
+    vector<Enum::EnumConstructor> cs;
+
+    Identifier enumName = in.parseIdentifier();
+    in.parseOpenCurly();
+    // enum must have 1 or more fields
+    while(1) {
+        Identifier cname = in.parseIdentifier();
+        StructFields *f = parseStructFields(in);
+        cs.push_back({cname, f});
+
+        if (in.parseOptionalCloseCurly()) { break; }
+        else { in.parseComma(); }
+    }
+    in.parseSemicolon();
+    return Enum(Span(lbegin, in.getCurrentLoc()), enumName, cs);
+}
+
 struct Module {
     vector<Fn> fns;
-
+    vector<Struct> structs;
+    vector<Enum> enums;
     OutFile &print(OutFile &out) const {
         for(Fn f: fns) {
             f.print(out); out << "\n";
@@ -971,10 +1084,14 @@ Module parseModule(Parser &in) {
     while (!in.eof()) {
         if (in.parseOptionalKeyword(String::copyCStr("fn"))) {
             m.fns.push_back(parseFn(in));
+        } else if (in.parseOptionalKeyword(String::copyCStr("struct"))) {
+            m.structs.push_back(parseStruct(in));
+        } else if (in.parseOptionalKeyword(String::copyCStr("enum"))) {
+            m.enums.push_back(parseEnum(in));
         } else {
             in.addErrAtCurrentLoc(
                 String::copyCStr("unknown top level starter"));
-            assert(false && "unable to find Fn");
+            assert(false && "unknown top level form.");
         }
     }
 

@@ -9,7 +9,7 @@ fn factorial(i: u64) -> u64 {
 }
 
 fn fib(i: SimpleInt) -> SimpleInt {
-    match i {
+    return match i {
         SimpleInt(ihash) -> match ihash {
             0 => 0,
             1 => 1,
@@ -17,6 +17,7 @@ fn fib(i: SimpleInt) -> SimpleInt {
         }
     }
 }
+
 fn main_fib() {
     let x = SimpleInt(6);
     return fib(6).0;
