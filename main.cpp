@@ -474,7 +474,7 @@ struct Parser {
             Error(l, String::sprintf("expected sigil: |%s|", sigil.asCStr())));
         exit(1);
     }
-    Span parseMatchingSigil(const String sigil) {
+    Span parseMatchingSigil(Span open, const String sigil) {
         optional<Span> span = parseOptionalSigil(sigil);
         if (span) {
             return *span;
