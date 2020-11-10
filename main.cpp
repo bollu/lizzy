@@ -188,8 +188,9 @@ void printfspan(Span span, const char *raw_input, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
     vprintfspan(span, raw_input, fmt, args);
-    va_end(args);
+   va_end(args);
 }
+
 
 void vprintferr(Loc loc, const char *raw_input, const char *fmt, va_list args) {
     char *outstr = nullptr;
@@ -392,14 +393,13 @@ struct Parser {
         return bool(parseOptionalSigil(String::copyCStr("}")));
     }
     Span parseOpenRoundBracket() { return parseSigil(String::copyCStr("(")); }
-    bool parseOptionalOpenRoundBracket(Span matching) {
-        return bool(parseOptionalSigil(String::copyCStr("(")));
+    
+    optional<Span> parseOptionalOpenRoundBracket() {
+        return parseOptionalSigil(String::copyCStr("("));
     }
-    bool parseCloseRoundBracket() {
-        return bool(parseOptionalSigil(String::copyCStr(")")));
-    }
+
     void parseCloseRoundBracket(Span open) {
-        return bool(parseMatchingSigil(open, String::copyCStr(")")));
+        parseMatchingSigil(open, String::copyCStr(")"));
     }
 
     bool parseOptionalCloseRoundBracket() {
@@ -474,6 +474,7 @@ struct Parser {
             Error(l, String::sprintf("expected sigil: |%s|", sigil.asCStr())));
         exit(1);
     }
+
     Span parseMatchingSigil(Span open, const String sigil) {
         optional<Span> span = parseOptionalSigil(sigil);
         if (span) {
@@ -639,12 +640,11 @@ struct Stmt {
     virtual void print(OutFile &out) const = 0;
 };
 
-enum class ECaseLHS { Int, Identifier };
+enum class ECaseLHS { Int, Identifier, TupleStruct };
 
 struct CaseLHS {
     const Span span;
     const ECaseLHS ty;
-
 
     CaseLHS(Span span, ECaseLHS ty) : span(span), ty(ty) {}
     virtual OutFile &print(OutFile &o) const = 0;
@@ -670,6 +670,8 @@ struct CaseLHSIdentifier : public CaseLHS {
 struct CaseLHSTupleStruct : public CaseLHS {
     const Identifier name;
     vector<CaseLHS *> fields;
+    CaseLHSTupleStruct(Span span, Identifier name) : 
+        CaseLHS(span, ECaseLHS::TupleStruct), name(name) {};
 };
 
 enum class ExprType { Case, Identifier, Integer, FnCall, Binop };
@@ -819,7 +821,8 @@ Expr *parseExprLeaf(Parser &in) {
     std::optional<Identifier> ident = in.parseOptionalIdentifier();
     if (ident) {
         // function call!
-        if (in.parseOptionalOpenRoundBracket()) {
+        optional<Span> open;
+        if ((open = in.parseOptionalOpenRoundBracket())) {
             if (in.parseOptionalCloseRoundBracket()) {
                 return new ExprFnCall(Span(lbegin, in.getCurrentLoc()), *ident,
                                       {});
@@ -830,7 +833,7 @@ Expr *parseExprLeaf(Parser &in) {
                 if (in.parseOptionalComma()) {
                     continue;
                 } else {
-                    in.parseCloseRoundBracket();
+                    in.parseCloseRoundBracket(*open);
                     break;
                 }
             }
@@ -976,7 +979,7 @@ Fn parseFn(Parser &in) {
     Identifier ident = in.parseIdentifier();
     in.parseOpenRoundBracket();
     vector<pair<Identifier, Type>> params;
-    while (!in.parseCloseRoundBracket()) {
+    while (!in.parseOptionalCloseRoundBracket()) {
         Identifier name = in.parseIdentifier();
         in.parseColon();
         Type t = parseType(in);
@@ -1015,7 +1018,7 @@ StructFields *parseStructFields(Parser &in) {
     } else {
         while(1) {
             types.push_back(parseType(in));
-            if (in.parseCloseRoundBracket()) { break; }
+            if (in.parseOptionalCloseRoundBracket()) { break; }
             else { in.parseComma(); }
         }
     }
